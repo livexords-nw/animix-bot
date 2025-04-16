@@ -33,6 +33,7 @@ class animix:
     }
 
     def __init__(self):
+        self.config = self.load_config()
         self.query_list = self.load_query("query.txt")
         self.token = None
         self.token_reguler = 0
@@ -45,7 +46,6 @@ class animix:
             "delete": requests.delete,
         }
         self.proxy_session = None
-        self.config = self.load_config()
         self.session = self.sessions()
         
     def sessions(self):
@@ -112,7 +112,7 @@ class animix:
 
     def banner(self) -> None:
         """Displays the banner for the bot."""
-        self.log("🎉 Animix Free Bot", Fore.CYAN)
+        self.log("🎉 Animix Bot", Fore.CYAN)
         self.log("🚀 Created by LIVEXORDS", Fore.CYAN)
         self.log("📢 Channel: t.me/livexordsscript\n", Fore.CYAN)
 
@@ -832,11 +832,9 @@ class animix:
                 self.log("❌ Invalid mission data format (expected a list).", Fore.RED)
                 return
 
-            # Prepare a set for missions that are still in progress
+            # Kumpulkan ID misi yang masih berjalan dan pet yang sedang sibuk.
             in_progress_ids = set()
-            # Prepare a dictionary for pets that are currently busy (already in use)
             busy_pets = {}
-
             for mission in missions:
                 mission_id = mission.get("mission_id")
                 mission_end_time = mission.get("end_time")
@@ -845,16 +843,15 @@ class animix:
 
                 if current_time < mission_end_time:
                     in_progress_ids.add(str(mission_id))
-                    # Record the pets already joined in the mission (if any)
                     pet_joined = mission.get("pet_joined", [])
                     if isinstance(pet_joined, list):
                         for pet_info in pet_joined:
                             pet_id = pet_info.get("pet_id")
                             if pet_id:
                                 busy_pets[pet_id] = busy_pets.get(pet_id, 0) + 1
-                    self.log(f"⚠️ Mission {mission_id} is still in progress.", Fore.YELLOW)
+                    # Tidak perlu log per misi yang masih berjalan di sini.
                 else:
-                    # Claim missions that have finished
+                    # Claim misi yang telah selesai.
                     claim_url = f"{self.BASE_URL}mission/claim"
                     claim_payload = {"mission_id": mission_id}
                     claim_response = requests.post(claim_url, headers=headers, json=claim_payload)
@@ -864,7 +861,7 @@ class animix:
                         self.log(f"❌ Failed to claim mission {mission_id} (Error: {claim_response.status_code}).", Fore.RED)
                         self.log(f"🔍 Claim response details: {claim_response.text}", Fore.RED)
 
-            # === STEP 2: Read mission definitions from local mission.json ===
+            # === STEP 2: Baca mission definitions dari local mission.json ===
             self.log("🔄 Reading mission definitions from mission.json...", Fore.CYAN)
             try:
                 with open("mission.json", "r") as f:
@@ -878,11 +875,14 @@ class animix:
                 self.log("❌ Invalid mission.json format (expected a list).", Fore.RED)
                 return
 
-            # --- NEW: Sort missions by total rewards (descending) so that missions with more rewards are prioritized ---
-            static_missions.sort(key=lambda m: sum(reward.get("amount", 0) for reward in m.get("rewards", [])), reverse=True)
+            # --- Sort misi berdasarkan total rewards (descending) ---
+            static_missions.sort(
+                key=lambda m: sum(reward.get("amount", 0) for reward in m.get("rewards", [])),
+                reverse=True
+            )
             self.log("🔄 Missions sorted based on total reward amounts.", Fore.CYAN)
 
-            # === STEP 3: Fetch pet list from API for assignment ===
+            # === STEP 3: Fetch pet list from API untuk assignment ===
             pet_url = f"{self.BASE_URL}pet/list"
             self.log("🔄 Fetching the list of pets...", Fore.CYAN)
             pet_response = requests.get(pet_url, headers=headers)
@@ -894,16 +894,28 @@ class animix:
                 return
             self.log("✅ Successfully fetched the list of pets.", Fore.GREEN)
 
-            # === STEP 4: Assign pets for missions that are NOT in progress ===
-            self.log("🔍 Filtering missions for pet assignment...", Fore.CYAN)
+            # === STEP 4: Filter misi yang belum in progress untuk assignment ===
+            filtered_missions = []
+            skipped_missions = []
             for mission_def in static_missions:
-                mission_id = str(mission_def.get("mission_id"))
-                # Skip missions that are still in progress
-                if mission_id in in_progress_ids:
-                    self.log(f"⚠️ Mission {mission_id} skipped (still in progress).", Fore.YELLOW)
+                try:
+                    mission_id = str(int(mission_def.get("mission_id")))
+                except (ValueError, TypeError):
+                    self.log(f"⚠️ Skipping mission with invalid mission_id: {mission_def.get('mission_id')}", Fore.YELLOW)
                     continue
 
-                # Build list of pet requirements from mission.json
+                if mission_id in in_progress_ids:
+                    skipped_missions.append(mission_id)
+                else:
+                    filtered_missions.append(mission_def)
+
+            if skipped_missions:
+                self.log(f"⚠️ Skipped missions in progress: {', '.join(skipped_missions)}", Fore.YELLOW)
+
+            self.log("🔍 Proceeding with pet assignment for available missions...", Fore.CYAN)
+            for mission_def in filtered_missions:
+                mission_id = str(int(mission_def.get("mission_id")))
+                # Bangun list persyaratan pet dari mission.json
                 required_pets = []
                 for i in range(1, 4):
                     pet_class = mission_def.get(f"pet_{i}_class")
@@ -911,69 +923,79 @@ class animix:
                     if pet_class is not None and pet_star is not None:
                         required_pets.append({"class": pet_class, "star": pet_star})
 
-                assigned = False
-                # Perform assignment in two rounds: round 1 = exact match, round 2 = relaxed (star >= requirement)
-                for round_num in [1, 2]:
-                    criteria = "Exact match" if round_num == 1 else "Relaxed star requirement"
-                    self.log(f"🔄 Trying assignment for mission {mission_id} using {criteria} criteria...", Fore.CYAN)
-                    # Use a while loop to retry if a PET_BUSY error occurs
-                    while True:
-                        # Filter available pets (those not exceeding usage limits)
-                        available_pets = [
-                            pet for pet in pets
-                            if busy_pets.get(pet.get("pet_id"), 0) < pet.get("amount", 1)
-                        ]
-                        pet_ids = []
-                        # For each requirement, find a pet that meets the criteria
-                        for req in required_pets:
-                            found = False
-                            # Iterate over a copy of available_pets
-                            for pet in available_pets[:]:
-                                if pet.get("class") == req["class"]:
-                                    pet_star = pet.get("star", 0)
-                                    req_star = req["star"]
-                                    if (round_num == 1 and pet_star == req_star) or (round_num == 2 and pet_star >= req_star):
-                                        pet_ids.append(pet.get("pet_id"))
-                                        available_pets.remove(pet)
-                                        found = True
-                                        break
-                            if not found:
-                                break  # Requirement not met for one pet
-                        # If not all required pets are found, break out of the while loop for this round
-                        if len(pet_ids) != len(required_pets):
-                            self.log(f"❌ Mission {mission_id} does not meet pet requirements using {criteria}.", Fore.RED)
+                self.log(f"🔍 Mission {mission_id} requires {len(required_pets)} pets.", Fore.CYAN)
+
+                matched_pets = []
+                backup_pets = []
+                used_pet_ids = set()
+                missing_requirements = []
+
+                for req in required_pets:
+                    found = False
+                    # Cari pet dengan exact match
+                    for pet in pets:
+                        pet_id = pet.get("pet_id")
+                        if pet_id in used_pet_ids:
+                            continue
+                        if busy_pets.get(pet_id, 0) >= pet.get("amount", 1):
+                            continue
+                        if pet.get("class") == req["class"] and pet.get("star", 0) == req["star"]:
+                            matched_pets.append(pet)
+                            used_pet_ids.add(pet_id)
+                            found = True
                             break
+                    if not found:
+                        # Cari pet dengan star >= requirement
+                        for pet in pets:
+                            pet_id = pet.get("pet_id")
+                            if pet_id in used_pet_ids:
+                                continue
+                            if busy_pets.get(pet_id, 0) >= pet.get("amount", 1):
+                                continue
+                            if pet.get("class") == req["class"] and pet.get("star", 0) >= req["star"]:
+                                backup_pets.append(pet)
+                                used_pet_ids.add(pet_id)
+                                found = True
+                                break
+                    if not found:
+                        missing_requirements.append(req)
 
-                        # If all required pets are found, try to assign the mission
-                        self.log(f"➡️ Assigning pets to mission {mission_id} using {criteria}...", Fore.CYAN)
-                        enter_url = f"{self.BASE_URL}mission/enter"
-                        payload = {"mission_id": mission_id}
-                        for i, pet_id in enumerate(pet_ids):
-                            payload[f"pet_{i+1}_id"] = pet_id
-                        enter_response = requests.post(enter_url, headers=headers, json=payload)
-                        if enter_response.status_code == 200:
-                            self.log(f"✅ Mission {mission_id} successfully started.", Fore.GREEN)
-                            # Update busy_pets for pets that have been assigned
-                            for pet_id in pet_ids:
-                                busy_pets[pet_id] = busy_pets.get(pet_id, 0) + 1
-                            assigned = True
-                            break  # Mission assigned successfully, exit while loop
-                        else:
-                            self.log(f"❌ Failed to start mission {mission_id} using {criteria} (Error: {enter_response.status_code}).", Fore.RED)
-                            self.log(f"🔍 Mission start response details: {enter_response.text}", Fore.RED)
-                            if "PET_BUSY" in enter_response.text:
-                                self.log(f"🔄 Retrying with different pets for mission {mission_id} using {criteria}...", Fore.YELLOW)
-                                continue  # Retry assignment for this round
-                            else:
-                                break  # For other errors, exit while loop
-                    # If assignment was successful, no need to try the second round
-                    if assigned:
+                if missing_requirements:
+                    req_str = ", ".join(f"{r['class']}-{r['star']}" for r in missing_requirements)
+                    self.log(f"⏸️ Holding off on mission {mission_id}, unavailable pets for requirements: {req_str}", Fore.YELLOW)
+                    continue
+
+                # Gabungkan pet yang didapat dari exact matching dan backup matching
+                all_pets = matched_pets + backup_pets
+                if len(all_pets) < len(required_pets):
+                    self.log(f"⏸️ Holding off on mission {mission_id}, not enough matching pets yet.", Fore.YELLOW)
+                    continue
+
+                # Deploy pet yang telah terpenuhi persyaratannya
+                pet_ids = [pet.get("pet_id") for pet in all_pets[:len(required_pets)]]
+                payload = {"mission_id": mission_id}
+                for i, pid in enumerate(pet_ids):
+                    payload[f"pet_{i+1}_id"] = pid
+
+                enter_url = f"{self.BASE_URL}mission/enter"
+                enter_response = requests.post(enter_url, headers=headers, json=payload)
+                if enter_response.status_code == 200:
+                    self.log(f"✅ Mission {mission_id} successfully started with pets: {pet_ids}", Fore.GREEN)
+                    for pid in pet_ids:
+                        busy_pets[pid] = busy_pets.get(pid, 0) + 1
+                else:
+                    self.log(f"❌ Failed to start mission {mission_id} (Error: {enter_response.status_code}).", Fore.RED)
+                    self.log(f"🔍 Response: {enter_response.text}", Fore.RED)
+                    # Jika terdapat error terkait pet busy, bisa menambahkan log retry secara ringkas
+                    if "PET_BUSY" in enter_response.text:
+                        self.log(f"🔄 Retrying mission {mission_id} with alternative pets...", Fore.YELLOW)
+                        continue
+                    else:
                         break
-                if not assigned:
-                    self.log(f"❌ Mission {mission_id} could not be assigned after both rounds.", Fore.RED)
 
-        except requests.exceptions.RequestException as e:
-            self.log(f"❌ An error occurred while processing: {e}", Fore.RED)
+        except Exception as e:
+            self.log(f"❌ Error while processing mission {mission_id}: {e}", Fore.RED)
+            self.log("⏭️ Skipping to next mission...", Fore.YELLOW)
 
     def quest(self) -> None:
         """Handles fetching and claiming quests."""
